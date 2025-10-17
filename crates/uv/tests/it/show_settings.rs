@@ -3570,6 +3570,7 @@ fn resolve_tool() -> anyhow::Result<()> {
         },
         force: false,
         editable: false,
+        no_editable: false,
         install_mirrors: PythonInstallMirrors {
             python_install_mirror: None,
             pypy_install_mirror: None,
