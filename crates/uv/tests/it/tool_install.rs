@@ -1219,6 +1219,7 @@ fn tool_install_already_installed() {
     "###);
 }
 
+
 /// Test installing a tool when its entry point already exists
 #[test]
 fn tool_install_force() {

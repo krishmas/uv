@@ -11,8 +11,8 @@ use uv_client::BaseClientBuilder;
 use uv_configuration::{Concurrency, Constraints, DryRun, Reinstall, TargetTriple, Upgrade};
 use uv_distribution::LoweredExtraBuildDependencies;
 use uv_distribution_types::{
-    ExtraBuildRequires, NameRequirementSpecification, Requirement, RequirementSource,
-    UnresolvedRequirementSpecification,
+    DirectorySourceDist, Dist, ExtraBuildRequires, NameRequirementSpecification, Requirement,
+    RequirementSource, Resolution, ResolvedDist, SourceDist, UnresolvedRequirementSpecification,
 };
 use uv_installer::{InstallationStrategy, SatisfiesResult, SitePackages};
 use uv_normalize::PackageName;
@@ -49,6 +49,7 @@ use crate::settings::{ResolverInstallerSettings, ResolverSettings};
 pub(crate) async fn install(
     package: String,
     editable: bool,
+    no_editable: bool,
     from: Option<String>,
     with: &[RequirementsSource],
     constraints: &[RequirementsSource],
@@ -314,6 +315,39 @@ pub(crate) async fn install(
     let installed_tools = InstalledTools::from_settings()?.init()?;
     let _lock = installed_tools.lock().await?;
 
+    // Local helper to convert any editable directory distributions to non-editable, mirroring
+    // sync's `apply_editable_mode(..., NonEditable)` without coupling to that module.
+    fn to_non_editable(resolution: Resolution) -> Resolution {
+        resolution.map(|dist| {
+            let ResolvedDist::Installable { dist, version } = dist else {
+                return None;
+            };
+            let Dist::Source(SourceDist::Directory(DirectorySourceDist {
+                name,
+                install_path,
+                editable: None | Some(true),
+                r#virtual,
+                url,
+            })) = dist.as_ref()
+            else {
+                return None;
+            };
+
+            Some(ResolvedDist::Installable {
+                dist: std::sync::Arc::new(Dist::Source(SourceDist::Directory(
+                    DirectorySourceDist {
+                        name: name.clone(),
+                        install_path: install_path.clone(),
+                        editable: Some(false),
+                        r#virtual: *r#virtual,
+                        url: url.clone(),
+                    },
+                ))),
+                version: version.clone(),
+            })
+        })
+    }
+
     // Find the existing receipt, if it exists. If the receipt is present but malformed, we'll
     // remove the environment and continue with the install.
     //
@@ -460,37 +494,103 @@ pub(crate) async fn install(
     // entrypoints always contain an absolute path to the relevant Python interpreter, which would
     // be invalidated by moving the environment.
     let environment = if let Some(environment) = existing_environment {
-        let environment = match update_environment(
-            environment.into_environment(),
-            spec,
-            Modifications::Exact,
-            python_platform.as_ref(),
-            Constraints::from_requirements(build_constraints.iter().cloned()),
-            ExtraBuildRequires::default(),
-            &settings,
-            &client_builder,
-            &state,
-            Box::new(DefaultResolveLogger),
-            Box::new(DefaultInstallLogger),
-            installer_metadata,
-            concurrency,
-            &cache,
-            workspace_cache,
-            DryRun::Disabled,
-            printer,
-            preview,
-        )
-        .await
-        {
-            Ok(update) => update.into_environment(),
-            Err(ProjectError::Operation(err)) => {
-                return diagnostics::OperationDiagnostic::native_tls(
-                    client_builder.is_native_tls(),
-                )
-                .report(err)
-                .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+        let environment = if no_editable {
+            // Mirror uv sync’s behavior: resolve, then convert editable dists to non-editable and sync.
+            let env_spec = EnvironmentSpecification::from(spec);
+
+            // Resolve with current interpreter.
+            let resolution = match resolve_environment(
+                env_spec,
+                environment.environment().interpreter(),
+                python_platform.as_ref(),
+                Constraints::from_requirements(build_constraints.iter().cloned()),
+                &settings.resolver,
+                &client_builder,
+                &state,
+                Box::new(DefaultResolveLogger),
+                concurrency,
+                &cache,
+                printer,
+                preview,
+            )
+            .await
+            {
+                Ok(resolution) => resolution,
+                Err(ProjectError::Operation(err)) => {
+                    return diagnostics::OperationDiagnostic::native_tls(
+                        client_builder.is_native_tls(),
+                    )
+                    .report(err)
+                    .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+                }
+                Err(err) => return Err(err.into()),
+            };
+
+            // Convert to non-editable.
+            let resolution = to_non_editable(resolution.into());
+
+            // Sync into existing env.
+            match sync_environment(
+                environment.into_environment(),
+                &resolution,
+                Modifications::Exact,
+                Constraints::from_requirements(build_constraints.iter().cloned()),
+                (&settings).into(),
+                &client_builder,
+                &state,
+                Box::new(DefaultInstallLogger),
+                installer_metadata,
+                concurrency,
+                &cache,
+                printer,
+                preview,
+            )
+            .await
+            {
+                Ok(env) => env,
+                Err(ProjectError::Operation(err)) => {
+                    return diagnostics::OperationDiagnostic::native_tls(
+                        client_builder.is_native_tls(),
+                    )
+                    .report(err)
+                    .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+                }
+                Err(err) => return Err(err.into()),
             }
-            Err(err) => return Err(err.into()),
+        } else {
+            // Default: use update_environment path.
+            match update_environment(
+                environment.into_environment(),
+                spec,
+                Modifications::Exact,
+                python_platform.as_ref(),
+                Constraints::from_requirements(build_constraints.iter().cloned()),
+                ExtraBuildRequires::default(),
+                &settings,
+                &client_builder,
+                &state,
+                Box::new(DefaultResolveLogger),
+                Box::new(DefaultInstallLogger),
+                installer_metadata,
+                concurrency,
+                &cache,
+                workspace_cache,
+                DryRun::Disabled,
+                printer,
+                preview,
+            )
+            .await
+            {
+                Ok(update) => update.into_environment(),
+                Err(ProjectError::Operation(err)) => {
+                    return diagnostics::OperationDiagnostic::native_tls(
+                        client_builder.is_native_tls(),
+                    )
+                    .report(err)
+                    .map_or(Ok(ExitStatus::Failure), |err| Err(err.into()));
+                }
+                Err(err) => return Err(err.into()),
+            }
         };
 
         // At this point, we updated the existing environment, so we should remove any of its
@@ -602,7 +702,11 @@ pub(crate) async fn install(
         // Sync the environment with the resolved requirements.
         match sync_environment(
             environment,
-            &resolution.into(),
+            &if no_editable {
+                to_non_editable(resolution.into())
+            } else {
+                resolution.into()
+            },
             Modifications::Exact,
             Constraints::from_requirements(build_constraints.iter().cloned()),
             (&settings).into(),

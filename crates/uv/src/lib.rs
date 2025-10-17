@@ -1383,6 +1383,7 @@ async fn run(mut cli: Cli) -> Result<ExitStatus> {
             Box::pin(commands::tool_install(
                 args.package,
                 args.editable,
+                args.no_editable,
                 args.from,
                 &requirements,
                 &constraints,

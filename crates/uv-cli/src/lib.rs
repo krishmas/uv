@@ -4790,6 +4790,12 @@ pub struct ToolInstallArgs {
     #[arg(short, long)]
     pub editable: bool,
 
+    /// Install any editable dependencies, including workspace members, as non-editable.
+    ///
+    /// This flag mirrors `uv sync --no-editable` behavior for tools.
+    #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), env = EnvVars::UV_NO_EDITABLE)]
+    pub no_editable: bool,
+
     /// Include the given packages in editable mode.
     #[arg(long)]
     pub with_editable: Vec<comma::CommaSeparatedRequirements>,

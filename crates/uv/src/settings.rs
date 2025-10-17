@@ -657,6 +657,7 @@ pub(crate) struct ToolInstallSettings {
     pub(crate) settings: ResolverInstallerSettings,
     pub(crate) force: bool,
     pub(crate) editable: bool,
+    pub(crate) no_editable: bool,
     pub(crate) install_mirrors: PythonInstallMirrors,
 }
 
@@ -671,6 +672,7 @@ impl ToolInstallSettings {
         let ToolInstallArgs {
             package,
             editable,
+            no_editable,
             from,
             with,
             with_editable,
@@ -738,6 +740,7 @@ impl ToolInstallSettings {
             python_platform,
             force,
             editable,
+            no_editable,
             refresh: Refresh::from(refresh),
             options,
             settings,
